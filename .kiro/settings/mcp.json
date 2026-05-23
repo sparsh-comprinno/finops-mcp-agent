@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "finops": {
+      "command": "uv",
+      "args": ["run", "--directory", "/home/sparsh/Projects/finops-mcp-agent", "python", "server.py"],
+      "env": {
+        "PATH": "/home/sparsh/.local/bin:/snap/bin:/usr/local/bin:/usr/bin:/bin"
+      }
+    }
+  }
+}
