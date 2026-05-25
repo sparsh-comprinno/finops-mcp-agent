@@ -26,6 +26,31 @@ def scan_rds(session: boto3.Session, region: str, lookback_days: int, profile: s
                 if is_replica:
                     continue
 
+                # Skip Aurora Serverless — billed per ACU-hour, scales to zero automatically
+                if db_class == "db.serverless":
+                    continue
+
+                # For Aurora cluster members, only flag the writer instance.
+                # Reader instances legitimately show zero connections when traffic
+                # goes through the cluster reader endpoint.
+                if cluster_id:
+                    try:
+                        cluster_resp = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
+                        cluster_members = cluster_resp["DBClusters"][0].get("DBClusterMembers", [])
+                        for member in cluster_members:
+                            if member["DBInstanceIdentifier"] == db_id and not member.get("IsClusterWriter", False):
+                                break  # This is a reader, skip it
+                        else:
+                            pass  # Writer or not found in members, continue checking
+                            # (fall through to connection check below)
+                        if any(
+                            m["DBInstanceIdentifier"] == db_id and not m.get("IsClusterWriter", False)
+                            for m in cluster_members
+                        ):
+                            continue  # Skip Aurora readers
+                    except Exception:
+                        pass  # If we can't determine, proceed with connection check
+
                 avg_conns = get_metric_average(
                     session, region, "AWS/RDS", "DatabaseConnections",
                     [{"Name": "DBInstanceIdentifier", "Value": db_id}], lookback_days,
