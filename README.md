@@ -4,10 +4,12 @@ An MCP server that scans AWS accounts for cost optimization opportunities and ge
 
 ## Features
 
-- **20+ resource types scanned** across compute, storage, database, networking, AI/ML, and migration
-- **Real pricing** from AWS Pricing API (not hardcoded estimates)
-- **Styled Excel reports** with 4 sheets: Executive Summary, MTD Costs, 3-Month Trends, Remediation Ledger
-- **AWS Organizations support** — scan all member accounts in one run with per-account sheet tabs
+- **21 scanners across 20+ resource types** — compute, storage, database, networking, AI/ML, and migration
+- **Real pricing from AWS Pricing API** — LRU-cached lookups for all resource types, no hardcoded estimates
+- **Concurrent scanning** — ThreadPoolExecutor runs all scanners in parallel across regions
+- **boto3 native** — direct SDK calls with adaptive retry (5 attempts, exponential backoff)
+- **Styled Excel reports** — 4 sheets: Executive Summary, MTD Costs, 3-Month Trends, Remediation Ledger
+- **AWS Organizations support** — scan all member accounts with per-account sheet tabs
 - **Security-first** — command whitelist, dry-run default, input validation, no shell injection
 - **Historical tracking** — trend analysis across multiple runs
 
@@ -15,12 +17,31 @@ An MCP server that scans AWS accounts for cost optimization opportunities and ge
 
 | Category | Resources | Detection |
 |----------|-----------|-----------|
-| Compute | EC2, ECS, EKS | Stopped instances, <5% CPU, empty clusters, zero-scale services, fixed-size nodegroups |
-| Storage | EBS, Snapshots, CloudWatch Logs | Unattached volumes, orphaned migration snapshots, no-retention logs >1GB |
-| Database | RDS, ElastiCache, OpenSearch, Redshift | Zero connections (with Aurora replica awareness), <5% CPU |
-| Networking | NAT GW, VPN, Client VPN, ELB/ALB/NLB/CLB, Elastic IPs | Idle LBs, unassociated EIPs, unused VPNs |
-| AI/ML | SageMaker, Bedrock | Idle endpoints, running/stopped notebooks, stuck training jobs, provisioned throughput |
-| Migration | DMS | Replication instances with no tasks |
+| Compute | EC2, ECS, EKS | Stopped instances (with EBS cost), <5% CPU + low network (skips ASG members), empty clusters, zero-scale services, fixed-size nodegroups |
+| Storage | EBS, Snapshots, CloudWatch Logs | Unattached volumes, orphaned snapshots (migration/AMI/CloudEndure), no-retention logs >1GB |
+| Database | RDS, ElastiCache, OpenSearch, Redshift | Zero connections (Aurora replica-aware), <5% EngineCPUUtilization, idle clusters |
+| Networking | NAT GW, VPN, Client VPN, ELB/ALB/NLB/CLB, Elastic IPs | Idle NATs (zero traffic + route table check), idle VPNs (zero tunnel data), idle/unused Client VPNs, no-target LBs, unassociated EIPs |
+| AI/ML | SageMaker, Bedrock | Idle endpoints, inactive notebooks (>7 days), stuck training jobs (>72h), provisioned throughput |
+| Migration | DMS | Idle instances (no tasks), instances with only stopped tasks (Multi-AZ aware) |
+
+## Architecture
+
+```
+finops-mcp-agent/
+├── server.py              # MCP tool definitions + orchestration
+├── pyproject.toml
+└── finops/
+    ├── core.py            # boto3 sessions, retry config, metrics, Finding class
+    ├── pricing.py         # AWS Pricing API with LRU cache (all resource types)
+    ├── report.py          # Excel report generation
+    └── scanners/
+        ├── compute.py     # EC2, ECS, EKS
+        ├── storage.py     # EBS, Snapshots, CloudWatch Logs
+        ├── database.py    # RDS, ElastiCache, OpenSearch, Redshift
+        ├── networking.py  # NAT, VPN, Client VPN, EIPs, ELBv2, CLB
+        ├── aiml.py        # SageMaker, Bedrock
+        └── migration.py   # DMS
+```
 
 ## Tools Exposed
 
@@ -42,7 +63,7 @@ An MCP server that scans AWS accounts for cost optimization opportunities and ge
 ### Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/finops-mcp-agent.git
+git clone https://github.com/sparsh-khandelwal/finops-mcp-agent.git
 cd finops-mcp-agent
 uv sync
 ```
@@ -103,7 +124,7 @@ export AWS_SECRET_ACCESS_KEY=...
 ### Remediation
 
 ```
-> Execute remediation: aws ec2 delete-volume --volume-id vol-xxx --profile my-profile --region us-east-1
+> Execute remediation: aws ec2 delete-volume --volume-id vol-xxx --region us-east-1 --profile my-profile
 # Shows dry-run preview by default
 
 > Execute with dry_run=False to actually run it
@@ -133,16 +154,42 @@ Reports are saved to `~/finops-reports/`:
 3. **Cost - Last 3 Months** — Monthly trend by service with totals
 4. **Remediation Ledger** — Per-resource findings with runnable AWS CLI commands
 
+## Pricing Accuracy
+
+All cost estimates use the **AWS Pricing API** as the primary source:
+
+| Resource | Pricing Method |
+|----------|---------------|
+| EC2 | Pricing API (on-demand, Linux, Shared tenancy) |
+| RDS | Pricing API (engine-specific, Multi-AZ aware) |
+| ElastiCache | Pricing API (engine-specific) |
+| OpenSearch | Pricing API (instance type) |
+| Redshift | Pricing API (node type) |
+| EBS | Pricing API (volume type, per-GB) |
+| NAT Gateway | Pricing API (region-specific usagetype) |
+| VPN | Pricing API (AmazonVPC service) |
+| Client VPN | Pricing API (subnet association hours) |
+| ALB/NLB | Pricing API (AWSELB, Application family) |
+| CLB | Pricing API (AWSELB, Load Balancer family) |
+| SageMaker | EC2 price × 1.25 multiplier |
+| DMS | EC2 price × 1.5 multiplier (Multi-AZ: ×2) |
+| Bedrock | Pricing API (Provisioned Throughput family) |
+| EKS | Fixed $0.10/hr (published rate) |
+| EIP | Fixed $0.005/hr (published rate) |
+
+Pricing results are LRU-cached (512 entries for EC2, 256 for RDS/ElastiCache/EBS, 64-128 for others) to avoid repeated API calls within a scan.
+
 ## Security
 
 | Feature | Implementation |
 |---------|---------------|
-| No shell injection | `shlex.split()` + array-based `subprocess.run()` |
+| No shell injection | `shlex.split()` + array-based `subprocess.run()` for remediation only |
 | Input validation | Profile names and region formats validated via regex |
 | Command whitelist | Only pre-approved AWS CLI operations allowed in remediation |
 | Dry-run default | Remediation requires explicit `dry_run=False` |
 | Audit logging | All operations logged with timestamps |
-| Real pricing | AWS Pricing API lookups (no stale hardcoded values) |
+| Adaptive retry | boto3 adaptive mode with 5 max attempts |
+| Safe defaults | RDS deletion creates final snapshot; findings skip when cost unknown |
 
 ## Required IAM Permissions
 
@@ -161,6 +208,7 @@ Reports are saved to `~/finops-reports/`:
         "rds:DescribeDBInstances",
         "elasticache:DescribeCacheClusters",
         "opensearch:ListDomainNames",
+        "opensearch:DescribeDomain",
         "redshift:DescribeClusters",
         "elbv2:Describe*",
         "elb:DescribeLoadBalancers",
@@ -172,6 +220,9 @@ Reports are saved to `~/finops-reports/`:
         "dms:DescribeReplicationTasks",
         "logs:DescribeLogGroups",
         "sagemaker:List*",
+        "sagemaker:DescribeEndpoint",
+        "sagemaker:DescribeNotebookInstance",
+        "sagemaker:DescribeTrainingJob",
         "bedrock:ListProvisionedModelThroughputs",
         "cloudwatch:GetMetricStatistics",
         "pricing:GetProducts"
@@ -208,8 +259,8 @@ uv sync
 # Run server directly (for testing)
 uv run python server.py
 
-# Test a function
-uv run python -c "import server; print(server.analyze_aws_costs('my-profile', ['us-east-1']))"
+# Verify imports
+uv run python -c "from finops.scanners import ALL_SCANNERS; print(f'{len(ALL_SCANNERS)} scanners loaded')"
 ```
 
 ## License
