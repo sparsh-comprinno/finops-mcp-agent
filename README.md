@@ -19,7 +19,7 @@ An MCP server that scans AWS accounts for cost optimization opportunities and ge
 |----------|-----------|-----------|
 | Compute | EC2, ECS, EKS | Stopped instances (with EBS cost), <5% CPU + low network (skips ASG members), empty clusters, zero-scale services, fixed-size nodegroups |
 | Storage | EBS, Snapshots, CloudWatch Logs | Unattached volumes, orphaned snapshots (migration/AMI/CloudEndure), no-retention logs >1GB |
-| Database | RDS, ElastiCache, OpenSearch, Redshift | Zero connections (Aurora replica-aware), <5% EngineCPUUtilization, idle clusters |
+| Database | RDS, ElastiCache, OpenSearch, Redshift | Zero connections (Aurora replica-aware, skips readers + Serverless v2), <5% EngineCPUUtilization, idle clusters |
 | Networking | NAT GW, VPN, Client VPN, ELB/ALB/NLB/CLB, Elastic IPs | Idle NATs (zero traffic + route table check), idle VPNs (zero tunnel data), idle/unused Client VPNs, no-target LBs, unassociated EIPs |
 | AI/ML | SageMaker, Bedrock | Idle endpoints, inactive notebooks (>7 days), stuck training jobs (>72h), provisioned throughput |
 | Migration | DMS | Idle instances (no tasks), instances with only stopped tasks (Multi-AZ aware) |
